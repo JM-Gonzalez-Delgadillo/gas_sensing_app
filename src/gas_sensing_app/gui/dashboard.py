@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (QMainWindow,
                              QTabWidget,
                              QTextEdit, 
                              QFileDialog, 
-                             QSpinBox, 
+                             QSpinBox,
+                             QDoubleSpinBox, 
                              QCheckBox, 
                              QGroupBox, 
                              QGridLayout, 
@@ -107,13 +108,91 @@ class GasSensingDashboard(QMainWindow):
 
         res_indicator_layout = QVBoxLayout()
         res_indicator_layout.addWidget(QLabel("Current Resistance:"))
-        
-        self.res_display = QLabel("--- Ω") # Resistance Display 
+
+        self.res_display = QLabel("--- Ω") 
         self.res_display.setObjectName("resistanceLabel")
         self.res_display.setFont(self.system_mono)
         self.res_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
         res_indicator_layout.addWidget(self.res_display)
+
+        # ==============================================================================
+        # --- KEITHLEY 2400 SMU CONTROL PANEL ---
+        # ==============================================================================
+        keithley_group = QGroupBox("SMU Measurement Mode")
+        keithley_layout = QGridLayout(keithley_group)
         
+        keithley_layout.addWidget(QLabel("Mode:"), 0, 0)
+        self.smu_mode_selector = QComboBox()
+        self.smu_mode_selector.addItems(["Resistance (Auto-Ohms)", "Constant Voltage (Chronoamperometry)"])
+        self.smu_mode_selector.currentIndexChanged.connect(self._toggle_smu_controls)
+        keithley_layout.addWidget(self.smu_mode_selector, 0, 1, 1, 2)
+        
+        self.bias_label = QLabel("Bias Voltage (V):")
+        self.bias_val = QDoubleSpinBox()
+        self.bias_val.setRange(-20.0, 20.0)
+        self.bias_val.setSingleStep(0.1)
+        self.bias_val.setValue(1.0)
+        
+        self.comp_label = QLabel("Compliance (A):")
+        self.comp_val = QDoubleSpinBox()
+        self.comp_val.setDecimals(4)
+        self.comp_val.setRange(0.0001, 1.05)
+        self.comp_val.setSingleStep(0.001)
+        self.comp_val.setValue(0.0100)
+
+        keithley_layout.addWidget(self.bias_label, 1, 0)
+        keithley_layout.addWidget(self.bias_val, 1, 1)
+        keithley_layout.addWidget(self.comp_label, 2, 0)
+        keithley_layout.addWidget(self.comp_val, 2, 1) 
+
+        self._toggle_smu_controls()
+
+        # ==============================================================================
+        # --- KEITHLEY 2700 CONTROL PANEL ---
+        # ==============================================================================  
+        mux_group = QGroupBox("Multiplexer Settings (2700 / 7706)")
+        mux_layout = QGridLayout(mux_group)
+        
+        self.use_mux_cb = QCheckBox("Enable 20-Channel Array")
+        self.use_mux_cb.toggled.connect(self._toggle_mux_controls)
+        mux_layout.addWidget(self.use_mux_cb, 0, 0, 1, 2)
+        
+        mux_layout.addWidget(QLabel("Operation Mode:"), 1, 0)
+        self.mux_mode_selector = QComboBox()
+        self.mux_mode_selector.addItems([
+            "Mode 1: Standalone (DMM Res)", 
+            "Mode 2: Switch Matrix (SMU Measures)", 
+            "Mode 3: Shunt Scan (Global Bias)"
+        ])
+        self.mux_mode_selector.currentIndexChanged.connect(self._toggle_mux_controls)
+        mux_layout.addWidget(self.mux_mode_selector, 1, 1)
+        
+        ch_layout = QHBoxLayout()
+        self.mux_start_val = QSpinBox()
+        self.mux_start_val.setRange(101, 120)
+        self.mux_start_val.setValue(101)
+        self.mux_end_val = QSpinBox()
+        self.mux_end_val.setRange(101, 120)
+        self.mux_end_val.setValue(120)
+        
+        ch_layout.addWidget(QLabel("Start Ch:"))
+        ch_layout.addWidget(self.mux_start_val)
+        ch_layout.addWidget(QLabel("End Ch:"))
+        ch_layout.addWidget(self.mux_end_val)
+        mux_layout.addLayout(ch_layout, 2, 0, 1, 2)
+        
+        self.shunt_label = QLabel("Shunt Res (Ω):")
+        self.shunt_val = QDoubleSpinBox()
+        self.shunt_val.setRange(1.0, 1000000.0)
+        self.shunt_val.setDecimals(1)
+        self.shunt_val.setValue(1000.0)
+        
+        mux_layout.addWidget(self.shunt_label, 3, 0)
+        mux_layout.addWidget(self.shunt_val, 3, 1)
+        
+        self._toggle_mux_controls()
+
+
         # TAB LAYOUT CONTROLS
         self.control_tabs = QTabWidget()
         
@@ -189,6 +268,8 @@ class GasSensingDashboard(QMainWindow):
 
         left_panel.addWidget(self.status_label)
         left_panel.addLayout(res_indicator_layout)
+        left_panel.addWidget(keithley_group) 
+        left_panel.addWidget(mux_group)
         left_panel.addSpacing(10)
         left_panel.addWidget(self.control_tabs)
         left_panel.addWidget(self.stop_btn)
@@ -268,6 +349,23 @@ class GasSensingDashboard(QMainWindow):
         self.queue_timer.timeout.connect(self.flush_console_queue)
         self.queue_timer.start(100) 
 
+    def _toggle_smu_controls(self):
+        is_constant_v = (self.smu_mode_selector.currentIndex() == 1)
+        self.bias_label.setVisible(is_constant_v)
+        self.bias_val.setVisible(is_constant_v)
+        self.comp_label.setVisible(is_constant_v)
+        self.comp_val.setVisible(is_constant_v)
+
+    def _toggle_mux_controls(self):
+        mux_enabled = self.use_mux_cb.isChecked()
+        self.mux_mode_selector.setEnabled(mux_enabled)
+        self.mux_start_val.setEnabled(mux_enabled)
+        self.mux_end_val.setEnabled(mux_enabled)   
+        # The shunt resistor controls are only relevant in Mode 3 (Shunt Scan)
+        is_shunt_mode = mux_enabled and (self.mux_mode_selector.currentIndex() == 2)
+        self.shunt_label.setVisible(is_shunt_mode)
+        self.shunt_val.setVisible(is_shunt_mode) 
+
     def sync_secondary_axis_views(self):
         self.shutter_view.setGeometry(self.mfc_plot.getViewBox().sceneBoundingRect())
         self.shutter_view.linkedViewChanged(self.mfc_plot.getViewBox(), pg.ViewBox.XAxis)
@@ -315,16 +413,48 @@ class GasSensingDashboard(QMainWindow):
 
     def start_recipe_mode(self):
         self.prepare_data_arrays()
-        self.worker = ExperimentWorker(self.config_path, self.recipe_path, mode='recipe')
+        
+        meas_mode = 'constant_voltage' if self.smu_mode_selector.currentIndex() == 1 else 'resistance'
+        mux_modes_map = {0: 'standalone', 1: 'switch_matrix', 2: 'shunt_scan'}
+        
+        self.worker = ExperimentWorker(
+            self.config_path, 
+            self.recipe_path, 
+            mode='recipe',
+            measurement_mode=meas_mode,
+            bias_voltage=self.bias_val.value(),
+            compliance=self.comp_val.value(),
+            use_mux=self.use_mux_cb.isChecked(),
+            mux_mode=mux_modes_map[self.mux_mode_selector.currentIndex()],
+            mux_start_ch=self.mux_start_val.value(),
+            mux_end_ch=self.mux_end_val.value(),
+            shunt_res=self.shunt_val.value()
+        )
         self.connect_and_start_worker()
+        
+        self._lock_ui_hardware_controls(True)
         self.control_tabs.setTabEnabled(1, False) 
         self.start_recipe_btn.setEnabled(False)
         self.load_recipe_btn.setEnabled(False)
 
     def start_manual_mode(self):
         self.prepare_data_arrays()
-        self.worker = ExperimentWorker(self.config_path, mode='manual')
+        
+        meas_mode = 'constant_voltage' if self.smu_mode_selector.currentIndex() == 1 else 'resistance'
+        
+        self.worker = ExperimentWorker(
+            self.config_path, 
+            mode='manual',
+            measurement_mode=meas_mode,
+            bias_voltage=self.bias_val.value(),
+            compliance=self.comp_val.value()
+        )
         self.connect_and_start_worker()
+
+        self.smu_mode_selector.setEnabled(False)
+        self.bias_val.setEnabled(False)
+        self.comp_val.setEnabled(False)
+
         self.control_tabs.setTabEnabled(0, False) 
         self.start_manual_btn.setEnabled(False)
         self.apply_manual_btn.setEnabled(True)
@@ -369,9 +499,25 @@ class GasSensingDashboard(QMainWindow):
     def stop_experiment(self):
         if hasattr(self, 'worker') and self.worker.isRunning(): self.worker.is_running = False
 
+    def _lock_ui_hardware_controls(self, locked: bool):
+        self.smu_mode_selector.setDisabled(locked)
+        self.bias_val.setDisabled(locked)
+        self.comp_val.setDisabled(locked)
+        
+        self.use_mux_cb.setDisabled(locked)
+        self.mux_mode_selector.setDisabled(locked)
+        self.mux_start_val.setDisabled(locked)
+        self.mux_end_val.setDisabled(locked)
+        self.shunt_val.setDisabled(locked)
+        
     def on_experiment_finished(self, log_path):
         self.stop_btn.setEnabled(False)
         self.apply_manual_btn.setEnabled(False)
+
+        self.smu_mode_selector.setEnabled(True)
+        self.bias_val.setEnabled(True)
+        self.comp_val.setEnabled(True)
+
         self.control_tabs.setTabEnabled(0, True)
         self.control_tabs.setTabEnabled(1, True)
         self.start_manual_btn.setEnabled(True)
