@@ -3,7 +3,6 @@ from enum import Enum
 from pathlib import Path
 
 import pyqtgraph as pg
-from PyQt6.QtGui import QFontDatabase
 
 
 class Theme(str, Enum):
@@ -16,7 +15,7 @@ ICON_DIR = Path(__file__).parent.parent.parent / "assets" / "icons"
 
 DEFAULT_THEME = Theme.DARK
 
-DEFAULT_FONT = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+DEFAULT_FONT = None  # Font resolution belongs to a live QApplication.
 
 
 def get_qss_assets(theme: Theme) -> dict[str, Path]:

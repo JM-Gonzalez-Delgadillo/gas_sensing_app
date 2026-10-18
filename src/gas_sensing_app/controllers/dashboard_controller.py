@@ -1,264 +1,169 @@
-import os
-import shutil
+"""Single owner of run state, GUI actions and worker lifecycle."""
+
+from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QFileDialog
 
+from gas_sensing_app.config.config import load_failure_flows
+from gas_sensing_app.core.recipe import load_recipe
 from gas_sensing_app.core.worker import ExperimentWorker
-from gas_sensing_app.gui.styles.theme_manager import (
-    load_theme,
-    refresh_style,
-    update_plot_theme,
-)
-
-ASSETS_DIR = Path(__file__).parent.parent / "assets"
+from gas_sensing_app.gui.styles.theme_manager import load_theme, update_plot_theme
+from gas_sensing_app.hardware.factory import HardwareFactory
 
 
 class DashboardController:
-    def __init__(self, window, config_path: str | Path = "config.yaml"):
-        self.window = window
-
-        # Apply configurations
-        self.config_path = Path(config_path)
+    def __init__(self, window, config):
+        self.window, self.config = window, config
+        self.worker = None
         self.recipe_path = None
-        self._create_dummy_files()
+        self.closing = False
+        self.console_log = None
+        console = config.logging.console_log
+        if console.enabled:
+            folder = Path(config.base_dir) / console.folder
+            folder.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            self.console_log = (folder / f"{console.filename_prefix}_{stamp}.log").open(
+                "x", encoding="utf-8"
+            )
+        window.theme_selector.currentIndexChanged.connect(self.change_theme)
+        window.load_recipe_btn.clicked.connect(self.select_recipe)
+        window.start_recipe_btn.clicked.connect(lambda: self.start("recipe"))
+        window.start_manual_btn.clicked.connect(lambda: self.start("manual"))
+        window.apply_manual_btn.clicked.connect(self.apply_manual)
+        window.stop_btn.clicked.connect(self.stop)
+        window.close_requested.connect(self.close_requested)
+        window.destroyed.connect(self.close_log)
 
-        # connect associations
-        self.window.theme_selector.currentIndexChanged.connect(self.change_theme)
-        self.window.load_recipe_btn.clicked.connect(self.select_recipe)
-        self.window.start_recipe_btn.clicked.connect(self.start_recipe_mode)
-        self.window.start_manual_btn.clicked.connect(self.start_manual_mode)
-        self.window.apply_manual_btn.clicked.connect(self.apply_manual_changes)
-        self.window.stop_btn.clicked.connect(self.stop_experiment)
+    def log(self, text):
+        self.window.console_display.appendPlainText(text)
+        if self.console_log:
+            self.console_log.write(f"{datetime.now(timezone.utc).isoformat()} {text}\n")
+            self.console_log.flush()
 
-    # connect functions
-    def change_theme(self, index):
-        theme = self.window.theme_selector.itemData(index)
+    def close_log(self):
+        if self.console_log:
+            self.console_log.close()
+            self.console_log = None
+
+    def change_theme(self):
+        theme = self.window.theme_selector.currentData()
         self.window.setStyleSheet(load_theme(theme))
-        update_plot_theme(self.window.mfc_plot, theme)
-        update_plot_theme(self.window.res_plot, theme)
-
-    def start_recipe_mode(self):
-        self.prepare_data_arrays()
-        self.worker = ExperimentWorker(
-            self.config_path, self.recipe_path, mode="recipe"
-        )
-        self.connect_and_start_worker()
-        self.window.control_tabs.setTabEnabled(1, False)
-        self.window.start_recipe_btn.setEnabled(False)
-        self.window.load_recipe_btn.setEnabled(False)
+        for plot in self.window.plots.plots.values():
+            update_plot_theme(plot, theme)
 
     def select_recipe(self):
-        file, _ = QFileDialog.getOpenFileName(
-            self.window, "Select YAML Recipe", "", "YAML Files (*.yaml)"
+        path, _ = QFileDialog.getOpenFileName(
+            self.window, "Select recipe", self.config.base_dir, "YAML (*.yaml *.yml)"
         )
-        if file:
-            self.recipe_path = file
-            self.window.status_label.setText(f"Loaded: {os.path.basename(file)}")
-            self.window.status_label.setProperty("textColor", "success")
-            self.window.status_label.setProperty("fontWeight", "bold")
-            refresh_style(self.window.status_label)
+        if path:
+            self.recipe_path = path
+            self.window.recipe_label.setText(path)
             self.window.start_recipe_btn.setEnabled(True)
 
-    def start_manual_mode(self):
-        self.prepare_data_arrays()
-        self.worker = ExperimentWorker(self.config_path, mode="manual")
-        self.connect_and_start_worker()
-        self.window.control_tabs.setTabEnabled(0, False)
+    def start(self, mode):
+        if self.window.running:
+            return
+        try:
+            measurement, gate = self.window.settings()
+            load_failure_flows(self.config)
+            stages = (
+                load_recipe(self.recipe_path, self.config, gate)
+                if mode == "recipe"
+                else None
+            )
+            for profile in [s.gate for s in stages] if stages else [gate]:
+                HardwareFactory(self.config).validate(profile)
+            worker = ExperimentWorker(self.config, measurement, gate, stages)
+            if mode == "manual":
+                worker.update_manual_setpoints(
+                    self.window.shutter_checkbox.isChecked(), self.flow_targets()
+                )
+        except Exception as exc:
+            self.error(str(exc))
+            return
+        self.worker = worker
+        self.window.plots.clear()
+        self.window.running = True
+        self.window.settings_group.setEnabled(False)
+        self.window.gate_group.setEnabled(False)
         self.window.start_manual_btn.setEnabled(False)
-        self.window.apply_manual_btn.setEnabled(True)
-        self.apply_manual_changes()
-
-    def apply_manual_changes(self):
-        if hasattr(self, "worker") and self.worker.isRunning():
-            flow_targets = {
-                1: self.window.mfc1_val.value(),
-                2: self.window.mfc2_val.value(),
-                3: self.window.mfc3_val.value(),
-                4: self.window.mfc4_val.value(),
-            }
-            # CHANGED: Extracts the manual targets directly as a
-            # clean boolean state flag
-            shutter_open_target = self.window.shutter_checkbox.isChecked()
-            self.worker.update_manual_setpoints(shutter_open_target, flow_targets)
-            print(
-                f"[Manual Mode Update]: Staging Shutter_Open={shutter_open_target}, "
-                f"Flows={list(flow_targets.values())}"
-            )
-
-    def stop_experiment(self):
-        if hasattr(self, "worker") and self.worker.isRunning():
-            self.worker.is_running = False
-
-    def connect_and_start_worker(self):
-        self.worker.data_sig.connect(self.update_live_data)
-        self.worker.status_sig.connect(self.update_status)
-        self.worker.error_sig.connect(self.handle_worker_error)
-        self.worker.finished_sig.connect(self.on_experiment_finished)
+        self.window.start_recipe_btn.setEnabled(False)
+        self.window.load_recipe_btn.setEnabled(False)
         self.window.stop_btn.setEnabled(True)
-        self.worker.start()
+        self.window.apply_manual_btn.setEnabled(mode == "manual")
+        self.window.control_tabs.setTabEnabled(0, mode == "manual")
+        self.window.control_tabs.setTabEnabled(1, mode == "recipe")
+        worker.data_sig.connect(self.update_data)
+        worker.status_sig.connect(self.status)
+        worker.error_sig.connect(self.error)
+        worker.finished.connect(self.finished)
+        self.status("Starting")
+        worker.start()
 
-    def prepare_data_arrays(self):
-        self.data_history = {
-            "time": [],
-            "resistance": [],
-            "flows": [[], [], [], []],
-            "shutter": [],
-        }
-        self.window.res_curve.setData([], [])
-        self.window.shutter_curve.setData([], [])
-        for curve in self.window.mfc_curves:
-            curve.setData([], [])
+    def flow_targets(self):
+        return {ch: widget.value() for ch, widget in self.window.flow_inputs.items()}
 
-    def update_live_data(self, data):
-        self.window.res_display.setText(f"{data['resistance']:.4e} Ω")
-        elapsed_t = len(self.data_history["time"])
-        self.data_history["time"].append(elapsed_t)
+    def apply_manual(self):
+        if self.worker and self.window.running:
+            try:
+                self.worker.update_manual_setpoints(
+                    self.window.shutter_checkbox.isChecked(), self.flow_targets()
+                )
+                self.log("Gas update queued for next complete sweep boundary")
+            except Exception as exc:
+                self.error(str(exc))
 
-        self.data_history["resistance"].append(data["resistance"])
-        self.window.res_curve.setData(
-            self.data_history["time"], self.data_history["resistance"]
+    def update_data(self, data):
+        self.window.plots.append(data)
+
+        def fmt(key):
+            return "—" if data[key] is None else f"{data[key]:.5g}"
+
+        self.window.readout.setText(
+            f"Sensor {data['device']} · R: {fmt('resistance_ohm')} Ω · "
+            f"V: {fmt('voltage_V')} V · I: {fmt('current_A')} A\n"
+            f"{data['measurement_status']}"
         )
 
-        self.data_history["shutter"].append(data["shutter"])
-        self.window.shutter_curve.setData(
-            self.data_history["time"], self.data_history["shutter"]
-        )
-
-        for i in range(4):
-            self.data_history["flows"][i].append(data["flows"][i])
-            self.window.mfc_curves[i].setData(
-                self.data_history["time"], self.data_history["flows"][i]
-            )
-
-    def update_status(self, text):
+    def status(self, text):
         self.window.status_label.setText(text)
+        self.log(text)
 
-    def handle_worker_error(self, err):
-        print(f"[CRITICAL WARNING]: {err}")
-        self.stop_experiment()
+    def error(self, text):
+        self.window.status_label.setText(f"Error: {text}")
+        self.log(f"ERROR: {text}")
 
-    def on_experiment_finished(self, log_path):
+    def stop(self):
+        if self.worker and self.window.running:
+            self.worker.stop()
+            self.window.stop_btn.setEnabled(False)
+            self.status("Stopping sources and applying failure gas profile…")
+
+    def close_requested(self):
+        self.closing = True
+        self.stop()
+
+    def finished(self):
+        worker = self.worker
+        self.window.running = False
+        self.window.settings_group.setEnabled(True)
+        self.window.gate_group.setEnabled(True)
+        self.window.start_manual_btn.setEnabled(True)
+        self.window.start_recipe_btn.setEnabled(bool(self.recipe_path))
+        self.window.load_recipe_btn.setEnabled(True)
         self.window.stop_btn.setEnabled(False)
         self.window.apply_manual_btn.setEnabled(False)
-        self.window.control_tabs.setTabEnabled(0, True)
-        self.window.control_tabs.setTabEnabled(1, True)
-        self.window.start_manual_btn.setEnabled(True)
-        if self.recipe_path:
-            self.window.start_recipe_btn.setEnabled(True)
-        self.window.load_recipe_btn.setEnabled(True)
-        print(f"Hardware loop cleanly halted. Session log saved to: {log_path}")
-
-    def _create_dummy_files(self):
-        """
-        Ensures the local lab computer runtime workspace folders and files exist.
-        Copies raw templates from the assets folder to preserve structural comments.
-        """
-        # Define template files paths
-        template_config = ASSETS_DIR / "config.template.yaml"
-        template_recipe = ASSETS_DIR / "recipe.template.yaml"
-
-        # 1. Check and copy live config.yaml fallback
-        if not os.path.exists(self.config_path):
-            if template_config.exists():
-                shutil.copy(template_config, self.config_path)
-                print(
-                    "[System Info] Generated local 'config.yaml' "
-                    "from master assets template."
-                )
-            else:
-                # Critical safety net fallback if assets folder is completely missing
-                print(
-                    "[Critical Warning] 'assets/config.template.yaml' not found! "
-                    "Falling back to safe hardcoded defaults."
-                )
-                fallback_config = {
-                    "hardware": {
-                        "use_mock": True,
-                        "keithley_2400": {
-                            "port": "MOCK_PORT",
-                            "auto_range": False,
-                            "manual_range": 200000,
-                            "four_wire": True,
-                        },
-                        "shutter": {
-                            "port": "MOCK_SHUTTER",
-                            "baud_rate": 115200,
-                            "open_angle": 90,
-                            "closed_angle": 0,
-                        },
-                        "mfc_controller": {
-                            "port": "MOCK_MFC",
-                            "range_sccm": {1: 1000, 2: 1000, 3: 200, 4: 200},
-                        },
-                    },
-                    "logging": {
-                        "data_log": {
-                            "folder": "data",
-                            "filename_prefix": "sensing_run",
-                        },
-                        "console_log": {
-                            "enabled": True,
-                            "folder": "logs",
-                            "filename_prefix": "log",
-                        },
-                    },
-                }
-                with open(self.config_path, "w") as f:
-                    yaml.dump(fallback_config, f)
-
-        # 2. Extract operational workspace directories dynamically from config.yaml
-        try:
-            with open(self.config_path, "r") as f:
-                cfg = yaml.safe_load(f) or {}
-        except Exception as e:
-            print(f"[Error] Failed to read config.yaml layout: {e}")
-            cfg = {}
-
-        # Safely fall back to default string folders if parameters
-        # are missing inside config.yaml
-        data_dir = cfg.get("logging", {}).get("data_log", {}).get("folder", "data")
-        log_dir = cfg.get("logging", {}).get("console_log", {}).get("folder", "logs")
-        recipe_dir = "recipes"
-
-        # 3. Create all dynamic storage directories safely (skips if they already exist)
-        for folder in [data_dir, log_dir, recipe_dir]:
-            Path(folder).mkdir(parents=True, exist_ok=True)
-
-        # 4. Seed the user recipes workspace folder with a base profile if it is empty
-        self.recipe_path = os.path.join(recipe_dir, "dummy_recipe.yaml")
-        if not os.path.exists(self.recipe_path):
-            if template_recipe.exists():
-                shutil.copy(template_recipe, self.recipe_path)
-                print(
-                    f"[System Info] Seeded recipes workspace with: "
-                    f"{os.path.basename(self.recipe_path)}"
-                )
-            else:
-                # Quick programmatic fallback array if the assets/
-                # recipe template is missing
-                fallback_recipe = {
-                    "steps": [
-                        {
-                            "name": "Purge_Phase",
-                            "duration": 10,
-                            "shutter_open": False,
-                            "mfc_flows": {1: 120, 2: 10},
-                        },
-                        {
-                            "name": "Expose_Gas",
-                            "duration": 20,
-                            "shutter_open": True,
-                            "mfc_flows": {1: 100, 2: 30},
-                        },
-                        {
-                            "name": "Recovery_Phase",
-                            "duration": 15,
-                            "shutter_open": False,
-                            "mfc_flows": {1: 120, 2: 10},
-                        },
-                    ]
-                }
-                with open(self.recipe_path, "w") as f:
-                    yaml.dump(fallback_recipe, f)
+        for index in (0, 1):
+            self.window.control_tabs.setTabEnabled(index, True)
+        if worker.engine.log_path:
+            self.log(f"CSV: {worker.engine.log_path}")
+        if worker.engine.errors:
+            self.window.status_label.setText(worker.engine.errors[-1])
+        self.worker = None
+        worker.deleteLater()
+        if self.closing:
+            self.close_log()
+            QTimer.singleShot(0, self.window.close)

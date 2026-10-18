@@ -1,50 +1,48 @@
+"""Application composition root; no hardware I/O before the user starts a run."""
+
+import argparse
+import shutil
 import sys
 from pathlib import Path
 
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from gas_sensing_app.config.config import Config
-from gas_sensing_app.controllers.dashboard_controller import DashboardController
-from gas_sensing_app.gui.dashboard import Dashboard
 
-PACKAGE_DIR = Path(__file__).resolve().parent
-ASSETS_DIR = PACKAGE_DIR / "assets"
-ROOT_DIR = Path.cwd().expanduser().resolve()
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 
 def main():
-    app = QApplication(sys.argv)
-
-    # Define explicit app signatures (Critical for Linux taskbar linking)
+    parser = argparse.ArgumentParser(description="Gas sensor acquisition")
+    parser.add_argument("--config", default="config.yaml")
+    args = parser.parse_args()
+    app = QApplication(sys.argv[:1])
     app.setApplicationName("GasSensingApp")
-    app.setApplicationDisplayName("Gas Sensing Dashboard")
-    app.setDesktopFileName("Gas_Sensing_App.desktop")
+    app.setWindowIcon(QIcon(str(ASSETS_DIR / "icon.png")))
+    try:
+        path = Path(args.config).resolve()
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ASSETS_DIR / "config.template.yaml", path)
+        config = Config(path).load()
+        failure_path = Path(config.base_dir) / config.safety_file
+        if not failure_path.exists():
+            failure_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ASSETS_DIR / "failure_gases.template.yaml", failure_path)
+        # Delay GUI imports until QApplication exists (font/theme setup).
+        from gas_sensing_app.controllers.dashboard_controller import DashboardController
+        from gas_sensing_app.gui.dashboard import Dashboard
 
-    # Resolve path to the icon relative to main.py
-    icon_path = ASSETS_DIR / "icon.png"
-
-    # Apply the icon to the entire OS process hierarchy
-    if icon_path.exists():
-        app.setWindowIcon(QIcon(str(icon_path)))
-    else:
-        print(f"[WARNING]: Global icon asset not found at: {icon_path}")
-
-    # Load configurations
-    # TODO retrieve default configs if file not found
-    config_path = ROOT_DIR / "config.yaml"
-    config = Config(config_path).load()
-
-    # Set main window and main controller
-    window = Dashboard(logging_config=config.logging)
-    controller = DashboardController(window, config_path=config_path)  # noqa: F841
-
-    # Show window
-    window.show()
-
-    # System exit
-    sys.exit(app.exec())
+        window = Dashboard(config)
+        controller = DashboardController(window, config)
+        app.aboutToQuit.connect(controller.close_log)
+        window.show()
+        return app.exec()
+    except Exception as exc:
+        QMessageBox.critical(None, "Startup error", str(exc))
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

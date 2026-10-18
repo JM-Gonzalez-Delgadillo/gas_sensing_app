@@ -7,7 +7,7 @@ name = "gas-sensing-app"
 version = "0.1.0"
 description = "A modular multi-threaded GUI application for laboratory gas sensing and instrument control"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     { name = "Thomas Fischer", email = "t.fischer@uni-koeln.de" }
 ]
@@ -50,7 +50,7 @@ dev = [
 ]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 line-length = 88
 src = ["src", "tests"]
 

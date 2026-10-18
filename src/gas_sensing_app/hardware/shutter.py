@@ -30,6 +30,8 @@ class ShutterController:
 
         # Read the acknowledgment: [OK###]
         response = self.ser.readline().decode("ascii").strip()
+        if not response.startswith("[OK") or not response.endswith("]"):
+            raise RuntimeError(f"Shutter rejected {payload}: {response!r}")
         return response
 
     def set_position(self, angle):

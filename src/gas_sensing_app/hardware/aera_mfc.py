@@ -1,5 +1,3 @@
-import time
-
 from pymeasure.instruments.proterial import ROD4
 
 
@@ -20,7 +18,11 @@ class AeraMFCManager:
 
         self.ranges = ranges or {1: 1000, 2: 1000, 3: 200, 4: 200}
         self.accuracies = accuracies or {}
-        self._initialize_channels()
+        try:
+            self._initialize_channels()
+        except BaseException:
+            self.rod4.adapter.close()
+            raise
 
     def _initialize_channels(self):
         print("Initializing Aera ROD-4 Channels...")
@@ -28,32 +30,18 @@ class AeraMFCManager:
             channel = getattr(self.rod4, f"ch_{ch_idx}")
             channel.mfc_range = max_range
             channel.flow_unit_display = "sccm"
+            channel.setpoint = 0
             channel.valve_mode = "flow"
         print("MFCs Ready.")
 
     def set_flow(self, channel_idx, sccm):
         """Sets the flow rate in sccm with comprehensive validation safeguards."""
+        from gas_sensing_app.config.validation import finite
+
         if channel_idx not in self.ranges:
-            print(f"Error: Channel {channel_idx} not configured.")
-            return
-
-        # 1. Negative numbers are explicitly ignored
-        if sccm < 0:
-            print(
-                f"[INFO]: Negative flow setpoint ({sccm} sccm) "
-                f"ignored on Ch {channel_idx}."
-            )
-            return
-
+            raise ValueError(f"Unknown MFC channel {channel_idx}")
         max_val = self.ranges[channel_idx]
-
-        # 2. Maximum range check: show an error in the log and do NOT coerce the value
-        if sccm > max_val:
-            print(
-                f"Error: Specified flow {sccm} sccm exceeds maximum capacity "
-                f"({max_val} sccm) for Ch {channel_idx}. Command Rejected."
-            )
-            return
+        finite(sccm, f"MFC {channel_idx}", 0, max_val)
 
         # 3. Accuracy warning boundary check
         # (0-1 fraction from configuration matching range layout)
@@ -77,7 +65,7 @@ class AeraMFCManager:
 
     def get_actual_flow(self, channel_idx):
         channel = getattr(self.rod4, f"ch_{channel_idx}")
-        return channel.actual_flow
+        return channel.actual_flow * self.ranges[channel_idx] / 100.0
 
     def stop_all(self):
         for i in self.ranges.keys():
@@ -86,8 +74,5 @@ class AeraMFCManager:
         print("All MFC flows set to 0.")
 
     def close(self):
-        print("Shutting down AeraMFCManager...")
-        self.stop_all()
-        time.sleep(0.5)
-        self.rod4.shutdown()
-        print("Connection closed.")
+        """Release communication without overriding the final purge setpoints."""
+        self.rod4.adapter.close()
