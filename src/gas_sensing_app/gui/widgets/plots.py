@@ -1,5 +1,6 @@
 """Four time-linked plots with bounded live history per sensor."""
 
+import importlib
 import math
 from collections import deque
 
@@ -7,11 +8,15 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QSplitter
 
+from gas_sensing_app.gui.styles.theme_manager import DEFAULT_THEME, update_plot_theme
+
 
 class MeasurementPlots(QSplitter):
     def __init__(self, gas_names, parent=None):
         super().__init__(Qt.Orientation.Vertical, parent)
         self.gas_names = gas_names
+        self.theme = DEFAULT_THEME
+        self.labels = {}
         self.plots = {}
         self.curves = {}
         self.history = {}
@@ -23,13 +28,16 @@ class MeasurementPlots(QSplitter):
         ):
             plot = pg.PlotWidget()
             plot.setProperty("title", title)
-            plot.setTitle(title)
+            plot.setTitle(title, size="11pt")
             plot.setLabel("left", title, units=unit)
             plot.getAxis("left").setWidth(85)
-            plot.setLabel("bottom", "Elapsed time", units="s")
+            if key == "flows":
+                plot.setLabel("bottom", "Elapsed time", units="s")
+            else:
+                plot.getAxis("bottom").setStyle(showValues=False)
             plot.showGrid(x=True, y=True, alpha=0.2)
             plot.addLegend(colCount=2, offset=(8, 8), labelTextSize="8pt")
-            plot.setMinimumHeight(160)
+            plot.setMinimumHeight(150)
             self.plots[key] = plot
             self.addWidget(plot)
         for key, plot in self.plots.items():
@@ -37,6 +45,7 @@ class MeasurementPlots(QSplitter):
                 plot.setXLink(self.plots["flows"])
         self.setChildrenCollapsible(False)
         self.setSizes([200] * 4)
+        self.apply_theme(DEFAULT_THEME)
 
     def clear(self):
         for plot in self.plots.values():
@@ -44,6 +53,8 @@ class MeasurementPlots(QSplitter):
             plot.plotItem.legend.clear()
         self.curves.clear()
         self.history.clear()
+        self.labels.clear()
+        self.fit()
 
     def append(self, data):
         values = [
@@ -61,9 +72,13 @@ class MeasurementPlots(QSplitter):
         for key, label, value in values:
             identity = (key, label)
             if identity not in self.curves:
-                color = pg.intColor(len(self.curves), hues=16)
+                if label not in self.labels:
+                    self.labels[label] = len(self.labels)
+                color = self.curve_color(label)
                 self.curves[identity] = self.plots[key].plot(
-                    name=label, pen=pg.mkPen(color, width=1.5), connect="finite"
+                    name=label.replace("_", " "),
+                    pen=self.curve_pen(label, color),
+                    connect="finite",
                 )
                 count = sum(1 for curve_key, _ in self.curves if curve_key == key)
                 self.plots[key].setMinimumHeight(max(160, 95 + ((count + 1) // 2) * 22))
@@ -72,3 +87,31 @@ class MeasurementPlots(QSplitter):
             times.append(data["elapsed_s"])
             samples.append(value if value is not None else math.nan)
             self.curves[identity].setData(list(times), list(samples))
+
+    def curve_color(self, label):
+        palette = importlib.import_module(
+            f"gas_sensing_app.themes.{self.theme.value}"
+        ).CURVE_COLORS
+        return palette[self.labels[label] % len(palette)]
+
+    def curve_pen(self, label, color):
+        return pg.mkPen(
+            color,
+            width=1.8,
+            style=(
+                Qt.PenStyle.DashLine
+                if label == "Gate setpoint"
+                else Qt.PenStyle.SolidLine
+            ),
+        )
+
+    def apply_theme(self, theme):
+        self.theme = theme
+        for plot in self.plots.values():
+            update_plot_theme(plot, theme)
+        for (_, label), curve in self.curves.items():
+            curve.setPen(self.curve_pen(label, self.curve_color(label)))
+
+    def fit(self):
+        for plot in self.plots.values():
+            plot.enableAutoRange()

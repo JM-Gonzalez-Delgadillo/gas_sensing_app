@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QFileDialog
 from gas_sensing_app.config.config import load_failure_flows
 from gas_sensing_app.core.recipe import load_recipe
 from gas_sensing_app.core.worker import ExperimentWorker
-from gas_sensing_app.gui.styles.theme_manager import load_theme, update_plot_theme
+from gas_sensing_app.gui.styles.theme_manager import load_theme, refresh_style
 from gas_sensing_app.hardware.factory import HardwareFactory
 
 
@@ -29,7 +29,7 @@ class DashboardController:
                 "x", encoding="utf-8"
             )
         window.theme_selector.currentIndexChanged.connect(self.change_theme)
-        window.load_recipe_btn.clicked.connect(self.select_recipe)
+        window.setup.load_recipe_btn.clicked.connect(self.select_recipe)
         window.start_recipe_btn.clicked.connect(lambda: self.start("recipe"))
         window.start_manual_btn.clicked.connect(lambda: self.start("manual"))
         window.apply_manual_btn.clicked.connect(self.apply_manual)
@@ -51,17 +51,40 @@ class DashboardController:
     def change_theme(self):
         theme = self.window.theme_selector.currentData()
         self.window.setStyleSheet(load_theme(theme))
-        for plot in self.window.plots.plots.values():
-            update_plot_theme(plot, theme)
+        self.window.plots.apply_theme(theme)
 
     def select_recipe(self):
         path, _ = QFileDialog.getOpenFileName(
             self.window, "Select recipe", self.config.base_dir, "YAML (*.yaml *.yml)"
         )
         if path:
-            self.recipe_path = path
-            self.window.recipe_label.setText(path)
-            self.window.start_recipe_btn.setEnabled(True)
+            self.load_recipe_file(path)
+
+    def load_recipe_file(self, path):
+        try:
+            _, gate = self.window.settings()
+            stages = load_recipe(path, self.config, gate)
+        except Exception as exc:
+            self.recipe_path = None
+            self.window.start_recipe_btn.setEnabled(False)
+            self.window.setup.recipe_label.setText("Recipe could not be loaded")
+            self.window.setup.recipe_preview.setText(str(exc))
+            self.error(str(exc))
+            return
+        self.recipe_path = path
+        self.window.setup.recipe_label.setText(Path(path).name)
+        self.window.setup.recipe_label.setToolTip(str(path))
+        lines = []
+        for index, stage in enumerate(stages, 1):
+            total = sum(stage.flows.values())
+            gate_text = stage.gate.mode if stage.gate.enabled else "off"
+            lines.append(
+                f"{index}. {stage.name} · at least {stage.duration:g} s\n"
+                f"   Total flow {total:g} sccm · gate {gate_text}"
+            )
+        self.window.setup.recipe_preview.setText("\n\n".join(lines))
+        self.window.start_recipe_btn.setEnabled(True)
+        self.status("Recipe ready. Review its steps, then start when ready.")
 
     def start(self, mode):
         if self.window.running:
@@ -79,61 +102,62 @@ class DashboardController:
             worker = ExperimentWorker(self.config, measurement, gate, stages)
             if mode == "manual":
                 worker.update_manual_setpoints(
-                    self.window.shutter_checkbox.isChecked(), self.flow_targets()
+                    self.window.setup.shutter_checkbox.isChecked(), self.flow_targets()
                 )
         except Exception as exc:
             self.error(str(exc))
             return
         self.worker = worker
-        self.window.plots.clear()
+        self.window.reset_readings()
         self.window.running = True
-        self.window.settings_group.setEnabled(False)
-        self.window.gate_group.setEnabled(False)
+        self.window.setup.settings_group.setEnabled(False)
+        self.window.setup.gate_group.setEnabled(False)
         self.window.start_manual_btn.setEnabled(False)
         self.window.start_recipe_btn.setEnabled(False)
-        self.window.load_recipe_btn.setEnabled(False)
+        self.window.setup.load_recipe_btn.setEnabled(False)
         self.window.stop_btn.setEnabled(True)
         self.window.apply_manual_btn.setEnabled(mode == "manual")
-        self.window.control_tabs.setTabEnabled(0, mode == "manual")
-        self.window.control_tabs.setTabEnabled(1, mode == "recipe")
+        self.window.setup.control_tabs.setTabEnabled(0, mode == "manual")
+        self.window.setup.control_tabs.setTabEnabled(1, mode == "recipe")
         worker.data_sig.connect(self.update_data)
         worker.status_sig.connect(self.status)
         worker.error_sig.connect(self.error)
         worker.finished.connect(self.finished)
-        self.status("Starting")
+        self.window.refresh_summary()
+        self.window.show_monitor()
+        self.status("Starting · preparing instruments")
         worker.start()
 
     def flow_targets(self):
-        return {ch: widget.value() for ch, widget in self.window.flow_inputs.items()}
+        return {
+            ch: widget.value() for ch, widget in self.window.setup.flow_inputs.items()
+        }
 
     def apply_manual(self):
         if self.worker and self.window.running:
             try:
                 self.worker.update_manual_setpoints(
-                    self.window.shutter_checkbox.isChecked(), self.flow_targets()
+                    self.window.setup.shutter_checkbox.isChecked(), self.flow_targets()
                 )
-                self.log("Gas update queued for next complete sweep boundary")
+                self.status("Gas changes queued · applied after the current sweep")
             except Exception as exc:
                 self.error(str(exc))
 
     def update_data(self, data):
-        self.window.plots.append(data)
-
-        def fmt(key):
-            return "—" if data[key] is None else f"{data[key]:.5g}"
-
-        self.window.readout.setText(
-            f"Sensor {data['device']} · R: {fmt('resistance_ohm')} Ω · "
-            f"V: {fmt('voltage_V')} V · I: {fmt('current_A')} A\n"
-            f"{data['measurement_status']}"
-        )
+        self.window.show_reading(data)
 
     def status(self, text):
         self.window.status_label.setText(text)
+        state = "complete" if text in ("Complete", "Stopped") else "ready"
+        self.window.status_label.setProperty("state", state)
+        refresh_style(self.window.status_label)
         self.log(text)
 
     def error(self, text):
         self.window.status_label.setText(f"Error: {text}")
+        self.window.status_label.setProperty("state", "error")
+        refresh_style(self.window.status_label)
+        self.window.details_toggle.setChecked(True)
         self.log(f"ERROR: {text}")
 
     def stop(self):
@@ -149,20 +173,23 @@ class DashboardController:
     def finished(self):
         worker = self.worker
         self.window.running = False
-        self.window.settings_group.setEnabled(True)
-        self.window.gate_group.setEnabled(True)
+        self.window.setup.settings_group.setEnabled(True)
+        self.window.setup.gate_group.setEnabled(True)
         self.window.start_manual_btn.setEnabled(True)
         self.window.start_recipe_btn.setEnabled(bool(self.recipe_path))
-        self.window.load_recipe_btn.setEnabled(True)
+        self.window.setup.load_recipe_btn.setEnabled(True)
         self.window.stop_btn.setEnabled(False)
         self.window.apply_manual_btn.setEnabled(False)
         for index in (0, 1):
-            self.window.control_tabs.setTabEnabled(index, True)
+            self.window.setup.control_tabs.setTabEnabled(index, True)
         if worker.engine.log_path:
             self.log(f"CSV: {worker.engine.log_path}")
+            self.window.saved_file.setText("CSV saved · see Session details")
+            self.window.saved_file.setToolTip(worker.engine.log_path)
         if worker.engine.errors:
-            self.window.status_label.setText(worker.engine.errors[-1])
+            self.error(worker.engine.errors[-1])
         self.worker = None
+        self.window.refresh_summary()
         worker.deleteLater()
         if self.closing:
             self.close_log()

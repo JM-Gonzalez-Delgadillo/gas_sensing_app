@@ -4,6 +4,17 @@ A PyQt6 application for gas sensor acquisition. Configuration, instrument driver
 experiment sequencing, storage, and the user interface are separate modules.
 Mock devices support development and testing without connected instruments.
 
+## Operator guide
+
+See the [Operator guide](src/gas_sensing_app/assets/manual/operator-guide.md) for
+connections, laboratory configuration, a first simulation, manual measurements,
+complete recipes, gate sweeps, and troubleshooting. The same guide is available
+through **Operator guide** in the application.
+
+The workspace separates **Measurement**, **Gases**, and optional **Gate** setup.
+Start and Stop remain visible. Narrow windows offer separate preparation and live
+reading views. Dark and Light buttons update the controls and all plot colors.
+
 ## Running the application
 
 Use Python 3.10 or later. From the project directory:

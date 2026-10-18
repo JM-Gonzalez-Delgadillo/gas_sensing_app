@@ -70,6 +70,10 @@ def update_plot_theme(plot, theme: Theme):
 
         axis.setPen(foreground)
         axis.setTextPen(foreground)
+        axis.label.setDefaultTextColor(pg.mkColor(foreground))
+    plot.plotItem.legend.setLabelTextColor(foreground)
+    plot.plotItem.legend.setBrush(pg.mkBrush(background))
+    plot.plotItem.legend.setPen(pg.mkPen(None))
 
 
 def replace_qss_assets(stylesheet: str, theme: Theme) -> str:
@@ -83,10 +87,8 @@ def load_theme(theme: Theme = DEFAULT_THEME) -> str:
     Load QSS and update pyqtgraph default theme.
     """
 
+    theme = Theme(theme)
     apply_pyqtgraph_theme(theme)
-
-    if isinstance(theme, str):
-        theme = Theme(theme)
 
     files = ["base.qss", f"{theme.value}.qss"]
 
@@ -99,6 +101,9 @@ def load_theme(theme: Theme = DEFAULT_THEME) -> str:
             continue
         stylesheet += path.read_text() + "\n"
 
+    colors = importlib.import_module(f"gas_sensing_app.themes.{theme.value}").COLORS
+    for name, color in colors.items():
+        stylesheet = stylesheet.replace(f"@{name}@", color)
     return replace_qss_assets(stylesheet, theme)
 
 
